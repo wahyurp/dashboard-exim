@@ -226,81 +226,95 @@ def load_and_process_dbf(file_ids, _drive_service):
         dfs.append(final_df)
     return pd.concat(dfs, ignore_index=True)
 
-# @st.cache_data(show_spinner=True)
 def get_impor_data(file_name):
+    import streamlit as st
+    import io
+    from googleapiclient.errors import HttpError
+
+    # Load master data dan setup Google Drive
     master_hs_full, master_hs2_digit, master_negara, master_bec, master_pelabuhan, konkordansi = load_impor_master_data()
     drive_service = setup_drive_service()
 
-    # (Opsional) Filter folder tertentu juga:
-    # file_query = f"name = '{file_name}' and '{FOLDER_ID}' in parents"
-    file_query = f"name = '{file_name}'"
+    try:
+        # Cari file berdasarkan nama
+        file_query = f"name = '{file_name}'"
+        results = drive_service.files().list(
+            q=file_query,
+            spaces='drive',
+            fields='files(id, name)',
+            pageSize=1
+        ).execute()
+        items = results.get('files', [])
 
-    # Cari file berdasarkan nama
-    results = drive_service.files().list(
-        q=file_query,
-        spaces='drive',
-        fields='files(id, name)',
-        pageSize=1
-    ).execute()
-    items = results.get('files', [])
-    file_id = items[0]['id']
-    # print("Mengunduh file dengan ID:", file_id)
+        if not items:
+            st.error(f"File '{file_name}' tidak ditemukan di Google Drive.")
+            return None
 
-    # Download file
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
+        file_id = items[0]['id']
 
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
+        # Download file
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
 
-    fh.seek(0)
-    filtered_df = pd.read_parquet(fh)
+        done = False
+        while not done:
+            try:
+                status, done = downloader.next_chunk()
+            except HttpError as e:
+                st.error(f"Gagal mengunduh file: {e}")
+                return None
+            except Exception as e:
+                st.error(f"Terjadi kesalahan saat mengunduh file: {e}")
+                return None
 
-    master_join = master_hs_full.merge(
-        master_hs2_digit,
-        left_on='HS2_2022',
-        right_on='Kode HS 2 digit',
-        how='left'
-    )[['Kode HS 2 digit', 'HS_2022', 'Deskripsi', 'Description', 'OILGRDESC',
-       'SECDESC', 'BRSDESC', 'COMGRPDESC', 'COMMDESC', 'BEC']]
-    
+        fh.seek(0)
 
-    ##KONKORDANSI
-    # Ambil df untuk tahun < 2020
-    df_pre2020 = filtered_df[filtered_df['Periode'].str.contains(r'-2020$')].copy()
-    mask = filtered_df['Periode'].str.contains(r'-2020$')
-    # st.dataframe(df_pre2020.head(1000))
+        # Baca parquet
+        try:
+            filtered_df = pd.read_parquet(fh)
+        except Exception as e:
+            st.error(f"Gagal membaca file parquet: {e}")
+            return None
 
-    # Lakukan merge konkordansi dan ubah HS
-    df_pre2020 = df_pre2020.merge(konkordansi, how='left', left_on='HS', right_on='HS2017')
-    df_pre2020['HS'] = df_pre2020['HS2022']
-    df_pre2020.drop(columns=['HS2017', 'HS2022'], inplace=True)
-    # st.dataframe(df_pre2020.head(1000))
+        # Merge master data
+        master_join = master_hs_full.merge(
+            master_hs2_digit,
+            left_on='HS2_2022',
+            right_on='Kode HS 2 digit',
+            how='left'
+        )[['Kode HS 2 digit', 'HS_2022', 'Deskripsi', 'Description', 'OILGRDESC',
+           'SECDESC', 'BRSDESC', 'COMGRPDESC', 'COMMDESC', 'BEC']]
 
-    # Sekarang replace di impor_jakarta
-    # filtered_df.update(df_pre2020)
-    filtered_df.loc[mask, df_pre2020.columns] = df_pre2020.values
-    
-    negara_impor = filtered_df.merge(master_negara, left_on='K_NEGARA', right_on='KodeAngka', how='left')
-    negara_join = negara_impor.merge(master_join, left_on='HS', right_on='HS_2022', how='left')
-    negara_join['BENUA'] = negara_join['BENUA'].str.upper()
-    negara_join['triwulan'] = negara_join['Periode'].apply(get_triwulan)
-    negara_join['semester'] = negara_join['Periode'].apply(get_semester)
-    negara_join['caturwulan'] = negara_join['Periode'].apply(get_caturwulan)
-    negara_join['tahun'] = negara_join['Periode'].apply(get_tahun)
+        # KONKORDANSI untuk data tahun 2020
+        df_pre2020 = filtered_df[filtered_df['Periode'].str.contains(r'-2020$')].copy()
+        mask = filtered_df['Periode'].str.contains(r'-2020$')
 
+        df_pre2020 = df_pre2020.merge(konkordansi, how='left', left_on='HS', right_on='HS2017')
+        df_pre2020['HS'] = df_pre2020['HS2022']
+        df_pre2020.drop(columns=['HS2017', 'HS2022'], inplace=True)
 
+        filtered_df.loc[mask, df_pre2020.columns] = df_pre2020.values
 
-    impor_all_data = negara_join.merge(master_bec, left_on='BEC', right_on='KODE BEC', how='left')
-    uncleaned_impor =  impor_all_data.merge(master_pelabuhan, left_on='PORT CODE', right_on='PORT CODE', how='left')
-    # if 'Tahun' in uncleaned_impor.columns:
-    #     drop_var = ['Tahun']
-    #     impor_data = uncleaned_impor.drop(columns=drop_var)
-    impor_data = uncleaned_impor.copy()
-    impor_data.drop(columns=['KODEHURUF','HS'], inplace=True)
-    return impor_data
+        # Join dengan referensi negara dan HS
+        negara_impor = filtered_df.merge(master_negara, left_on='K_NEGARA', right_on='KodeAngka', how='left')
+        negara_join = negara_impor.merge(master_join, left_on='HS', right_on='HS_2022', how='left')
+        negara_join['BENUA'] = negara_join['BENUA'].str.upper()
+        negara_join['triwulan'] = negara_join['Periode'].apply(get_triwulan)
+        negara_join['semester'] = negara_join['Periode'].apply(get_semester)
+        negara_join['caturwulan'] = negara_join['Periode'].apply(get_caturwulan)
+        negara_join['tahun'] = negara_join['Periode'].apply(get_tahun)
+
+        impor_all_data = negara_join.merge(master_bec, left_on='BEC', right_on='KODE BEC', how='left')
+        uncleaned_impor = impor_all_data.merge(master_pelabuhan, left_on='PORT CODE', right_on='PORT CODE', how='left')
+        impor_data = uncleaned_impor.copy()
+        impor_data.drop(columns=['KODEHURUF', 'HS'], inplace=True)
+
+        return impor_data
+
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat memproses data impor: {e}")
+        return None
 
 # st.cache_data(show_spinner=True)
 def get_ekspor_data(file_name):
