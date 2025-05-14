@@ -6,7 +6,6 @@ google-api-python-client
 google-cloud-bigquery
 gspread-pandas
 dbfread
-altair
 plotly
 seaborn
 matplotlib
