@@ -1,0 +1,12 @@
+streamlit>=1.22.0
+pandas>=1.5.0
+simpledbf>=0.1.6
+google-auth>=2.16.0
+google-api-python-client>=2.80.0
+google-cloud-bigquery>=3.5.0
+gspread-pandas>=3.3.0
+dbfread>=2.0.7
+altair>=4.2.0
+plotly>=5.13.0
+seaborn>=0.12.2
+matplotlib>=3.7.0
